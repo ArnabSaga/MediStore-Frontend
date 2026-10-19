@@ -51,7 +51,7 @@ export function AiChatMessage({
               aria-hidden="true"
             />
           ) : null}
-          <p className="whitespace-pre-wrap break-words leading-6">
+          <p className="whitespace-pre-wrap wrap-break-word leading-6">
             {message.content}
           </p>
         </div>
@@ -149,7 +149,7 @@ export function AiChatWelcome({
 
       <p className="mt-6 flex items-center gap-1.5 text-[11px] text-muted-foreground">
         <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
-        Catalog information only — not medical advice.
+        Catalog information only - not medical advice.
       </p>
     </div>
   );

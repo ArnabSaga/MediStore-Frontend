@@ -234,7 +234,7 @@ export function AiChatWidget() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent
           showCloseButton={false}
-          className="fixed inset-0 z-50 flex h-[100dvh] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-2xl outline-none sm:top-auto sm:right-6 sm:bottom-24 sm:left-auto sm:h-[min(680px,calc(100dvh-8rem))] sm:w-[420px] sm:max-w-[420px] sm:rounded-3xl sm:border"
+          className="fixed inset-0 z-50 flex h-dvh w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 bg-background p-0 shadow-2xl outline-none sm:top-auto sm:right-6 sm:bottom-24 sm:left-auto sm:h-[min(680px,calc(100dvh-8rem))] sm:w-105 sm:max-w-105 sm:rounded-3xl sm:border"
         >
           <header className="relative flex shrink-0 items-center gap-3 border-b border-white/10 bg-[linear-gradient(135deg,var(--button-primary),var(--button-accent))] px-4 py-4 pt-[calc(1rem+env(safe-area-inset-top))] text-white sm:pt-4">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white/15">
@@ -320,7 +320,7 @@ export function AiChatWidget() {
             <div className="mt-2 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1">
                 <ShieldCheck className="h-3 w-3" aria-hidden="true" />
-                Catalog info only — not medical advice.
+                Catalog info only - not medical advice.
               </span>
               {input.length > 800 ? (
                 <span>
