@@ -13,7 +13,7 @@ export type CartItem = {
   qty: number;
 };
 
-type AddItemInput = Omit<CartItem, "qty">;
+export type AddItemInput = Omit<CartItem, "qty">;
 
 type CartState = {
   items: CartItem[];
@@ -21,6 +21,7 @@ type CartState = {
   add: (item: AddItemInput) => void;
   remove: (id: string) => void;
   updateQty: (id: string, qty: number) => void;
+  setItem: (item: AddItemInput, qty: number) => void;
   clear: () => void;
 
   totalItems: () => number;
@@ -59,6 +60,37 @@ export const useCartStore = create<CartState>()(
         set({
           items: get().items.map((i) => (i.id === id ? { ...i, qty } : i)),
         });
+      },
+
+      // Absolute, idempotent quantity set used by AI cart proposals. Repeating
+      // the same call produces the same cart, unlike add(). It can also add a
+      // missing line, unlike updateQty().
+      setItem: (item, qty) => {
+        if (!Number.isFinite(qty)) {
+          return;
+        }
+
+        const quantity = Math.floor(qty);
+        const items = get().items;
+        const index = items.findIndex((i) => i.id === item.id);
+
+        if (quantity <= 0) {
+          if (index >= 0) {
+            set({ items: items.filter((i) => i.id !== item.id) });
+          }
+          return;
+        }
+
+        if (index >= 0) {
+          set({
+            items: items.map((i) =>
+              i.id === item.id ? { ...i, qty: quantity } : i
+            ),
+          });
+          return;
+        }
+
+        set({ items: [...items, { ...item, qty: quantity }] });
       },
 
       clear: () => set({ items: [] }),

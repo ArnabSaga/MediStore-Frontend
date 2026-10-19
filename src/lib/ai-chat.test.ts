@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  AI_CHAT_MAX_CART_ITEMS,
+  AI_CHAT_MAX_CART_QUANTITY,
   AI_CHAT_MAX_HISTORY,
   AI_CHAT_MAX_MESSAGE_LENGTH,
   AiChatError,
+  buildAiChatCartFingerprint,
   formatBdt,
   getAiChatErrorMessage,
+  normalizeAiChatCart,
   normalizeAiChatHistory,
   sendAiChatMessage,
   type AiChatHistoryMessage,
@@ -32,6 +36,32 @@ const chatResult: AiChatResult = {
   answer: "Napa One is available.",
   products: [product],
   meta: { model: "test-model", toolCalls: 1, fallback: false },
+};
+
+const cartProposal = {
+  id: "proposal-1",
+  action: "SET_QTY" as const,
+  items: [
+    {
+      medicineId: "p1",
+      name: "Napa One",
+      slug: "napa-one",
+      manufacturer: "Beximco",
+      price: 2.51,
+      stock: 12,
+      imageUrl: null,
+      seller: { id: "s1", name: "MediStore", image: null },
+      previousQuantity: 1,
+      quantity: 3,
+    },
+  ],
+  cartFingerprint: "p1:1",
+};
+
+const cartConflict = {
+  code: "SINGLE_SELLER" as const,
+  message:
+    "For now, one order can contain medicines from only one seller. Remove items from the other seller and try again.",
 };
 
 const makeFetchResponse = (
@@ -125,6 +155,48 @@ describe("sendAiChatMessage", () => {
     expect(String(init.body)).not.toMatch(/gemini|api[_-]?key/i);
   });
 
+  it("sends the current cart snapshot without trusting product facts", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({ success: true, data: chatResult })
+    );
+
+    await sendAiChatMessage({
+      message: "make napa 3",
+      cart: [
+        { medicineId: "p2", quantity: 1 },
+        { medicineId: "p1", quantity: 2 },
+      ],
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(body).toEqual({
+      message: "make napa 3",
+      history: [],
+      cart: {
+        items: [
+          { medicineId: "p2", quantity: 1 },
+          { medicineId: "p1", quantity: 2 },
+        ],
+      },
+    });
+    expect(Object.keys(body)).toEqual(["message", "history", "cart"]);
+  });
+
+  it("does not send a cart field when no cart is provided", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({ success: true, data: chatResult })
+    );
+
+    await sendAiChatMessage({ message: "hello" });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+    expect(Object.keys(body)).toEqual(["message", "history"]);
+  });
+
   it("limits history to six messages before sending", async () => {
     fetchMock.mockResolvedValueOnce(
       makeFetchResponse({ success: true, data: chatResult })
@@ -188,6 +260,154 @@ describe("sendAiChatMessage", () => {
         message: "Request failed (500)",
       }
     );
+  });
+
+  it("accepts a verified cart proposal response", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({
+        success: true,
+        data: {
+          ...chatResult,
+          answer: "I can make that cart change.",
+          products: [],
+          cart: { proposal: cartProposal },
+        },
+      })
+    );
+
+    const result = await sendAiChatMessage({ message: "make napa 3" });
+
+    expect(result.cart).toEqual({ proposal: cartProposal });
+  });
+
+  it("accepts a clear proposal that lists the removed items", async () => {
+    const clearProposal = {
+      ...cartProposal,
+      action: "CLEAR" as const,
+      items: [{ ...cartProposal.items[0], quantity: 0 }],
+    };
+
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({
+        success: true,
+        data: {
+          ...chatResult,
+          answer: "I can empty your cart.",
+          products: [],
+          cart: { proposal: clearProposal },
+        },
+      })
+    );
+
+    const result = await sendAiChatMessage({ message: "clear my cart" });
+
+    expect(result.cart).toEqual({ proposal: clearProposal });
+  });
+
+  it("accepts a cart conflict response", async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({
+        success: true,
+        data: {
+          ...chatResult,
+          answer: cartConflict.message,
+          products: [],
+          cart: { conflict: cartConflict },
+        },
+      })
+    );
+
+    const result = await sendAiChatMessage({ message: "add another seller" });
+
+    expect(result.cart).toEqual({ conflict: cartConflict });
+  });
+
+  it("accepts a cart summary response", async () => {
+    const summary = {
+      items: [
+        {
+          medicineId: "p1",
+          name: "Napa One",
+          slug: "napa-one",
+          quantity: 2,
+          stock: 12,
+          inStock: true,
+          seller: { id: "s1", name: "MediStore", image: null },
+        },
+      ],
+      totalItems: 2,
+      singleSeller: true,
+    };
+
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({
+        success: true,
+        data: {
+          ...chatResult,
+          answer: "Your cart has 2 items.",
+          products: [],
+          cart: { summary },
+        },
+      })
+    );
+
+    const result = await sendAiChatMessage({ message: "what is in my cart?" });
+
+    expect(result.cart).toEqual({ summary });
+  });
+
+  it.each<[string, unknown]>([
+    ["two cart variants", { proposal: cartProposal, conflict: cartConflict }],
+    ["no cart variant", {}],
+    [
+      "an empty SET_QTY proposal",
+      { proposal: { ...cartProposal, items: [] } },
+    ],
+    [
+      "an unknown action",
+      { proposal: { ...cartProposal, action: "INCREMENT" } },
+    ],
+    [
+      "a fractional proposed quantity",
+      {
+        proposal: {
+          ...cartProposal,
+          items: [{ ...cartProposal.items[0], quantity: 1.5 }],
+        },
+      },
+    ],
+  ])("rejects %s in a cart response", async (_label, cart) => {
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse({
+        success: true,
+        data: {
+          ...chatResult,
+          answer: "Malformed cart.",
+          products: [],
+          cart,
+        },
+      })
+    );
+
+    await expect(sendAiChatMessage({ message: "hello" })).rejects.toMatchObject(
+      { kind: "invalid" }
+    );
+  });
+
+  it("rejects an oversized cart snapshot before calling fetch", async () => {
+    const cart = Array.from(
+      { length: AI_CHAT_MAX_CART_ITEMS + 1 },
+      (_, index) => ({
+        medicineId: `p${index}`,
+        quantity: 1,
+      })
+    );
+
+    await expect(
+      sendAiChatMessage({ message: "hello", cart })
+    ).rejects.toMatchObject({ kind: "invalid" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects malformed response envelopes", async () => {
@@ -258,6 +478,57 @@ describe("sendAiChatMessage", () => {
   });
 });
 
+describe("cart helpers", () => {
+  it("deduplicates ids and drops unusable lines", () => {
+    expect(
+      normalizeAiChatCart([
+        { medicineId: "p1", quantity: 1 },
+        { medicineId: "p1", quantity: 3 },
+        { medicineId: "p2", quantity: 0 },
+        { medicineId: "p3", quantity: 2.5 },
+        { medicineId: "   ", quantity: 1 },
+        { medicineId: "p4", quantity: AI_CHAT_MAX_CART_QUANTITY + 1 },
+      ])
+    ).toEqual([{ medicineId: "p1", quantity: 3 }]);
+  });
+
+  it("rejects a cart above the backend limit", () => {
+    const items = Array.from(
+      { length: AI_CHAT_MAX_CART_ITEMS + 1 },
+      (_, index) => ({ medicineId: `p${index}`, quantity: 1 })
+    );
+
+    expect(() => normalizeAiChatCart(items)).toThrowError(AiChatError);
+  });
+
+  it("builds a fingerprint in code-unit order regardless of input order", () => {
+    const expected = buildAiChatCartFingerprint([
+      { medicineId: "p1", quantity: 2 },
+      { medicineId: "p2", quantity: 1 },
+    ]);
+
+    expect(expected).toBe("p1:2|p2:1");
+    expect(
+      buildAiChatCartFingerprint([
+        { medicineId: "p2", quantity: 1 },
+        { medicineId: "p1", quantity: 2 },
+      ])
+    ).toBe(expected);
+
+    // Code-unit ordering puts uppercase B before lowercase a.
+    expect(
+      buildAiChatCartFingerprint([
+        { medicineId: "a", quantity: 1 },
+        { medicineId: "B", quantity: 2 },
+      ])
+    ).toBe("B:2|a:1");
+  });
+
+  it("uses the empty sentinel for an empty cart", () => {
+    expect(buildAiChatCartFingerprint([])).toBe("empty");
+  });
+});
+
 describe("getAiChatErrorMessage", () => {
   it.each<[AiChatError, string]>([
     [new AiChatError("http", "", { status: 400 }), "check your message"],
@@ -280,5 +551,17 @@ describe("getAiChatErrorMessage", () => {
     expect(getAiChatErrorMessage(new Error("boom"))).toBe(
       "Something went wrong. Please try again."
     );
+  });
+
+  it("surfaces a specific backend 400 message", () => {
+    expect(
+      getAiChatErrorMessage(
+        new AiChatError(
+          "http",
+          "Your cart includes a medicine that is no longer available in the catalog. Remove it from your cart and try again.",
+          { status: 400 }
+        )
+      )
+    ).toContain("no longer available");
   });
 });

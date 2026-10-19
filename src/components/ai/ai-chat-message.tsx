@@ -9,8 +9,10 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import type { AiChatCartProposal } from "@/lib/ai-chat";
 import { cn } from "@/lib/utils";
 
+import { AiCartConflictChip, AiCartProposal } from "./ai-cart-proposal";
 import { AiProductCard } from "./ai-product-card";
 import {
   AI_CHAT_SUGGESTIONS,
@@ -22,13 +24,22 @@ export function AiChatMessage({
   message,
   pending,
   onRetry,
+  onConfirmCart,
+  onCancelCart,
 }: {
   message: AiChatUiMessage;
   pending: boolean;
   onRetry: (retry: AiChatRetryPayload, messageId: string) => void;
+  onConfirmCart: (
+    messageId: string,
+    proposal: AiChatCartProposal
+  ) => void;
+  onCancelCart: (messageId: string) => void;
 }) {
   const isUser = message.role === "user";
   const retry = message.retry;
+  const proposal = message.cart?.proposal;
+  const conflict = message.cart?.conflict;
 
   return (
     <div
@@ -63,6 +74,17 @@ export function AiChatMessage({
             ))}
           </div>
         ) : null}
+
+        {proposal ? (
+          <AiCartProposal
+            proposal={proposal}
+            status={message.cartStatus ?? "pending"}
+            onConfirm={() => onConfirmCart(message.id, proposal)}
+            onCancel={() => onCancelCart(message.id)}
+          />
+        ) : null}
+
+        {conflict ? <AiCartConflictChip conflict={conflict} /> : null}
 
         {message.fallback ? (
           <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">

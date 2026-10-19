@@ -4,6 +4,8 @@ import { apiUrl } from "@/lib/url";
 
 export const AI_CHAT_MAX_HISTORY = 6;
 export const AI_CHAT_MAX_MESSAGE_LENGTH = 1000;
+export const AI_CHAT_MAX_CART_ITEMS = 20;
+export const AI_CHAT_MAX_CART_QUANTITY = 10_000;
 export const AI_CHAT_TIMEOUT_MS = 20_000;
 
 const aiChatRoleSchema = z.enum(["user", "assistant"]);
@@ -38,9 +40,109 @@ const aiChatProductSchema = z.object({
   reviewCount: z.number().int().nonnegative(),
 });
 
+const aiChatCartInputItemSchema = z.object({
+  medicineId: z.string().trim().min(1),
+  quantity: z
+    .number()
+    .int()
+    .min(1)
+    .max(AI_CHAT_MAX_CART_QUANTITY),
+});
+
+const aiChatCartSellerSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  image: z.string().nullable(),
+});
+
+const aiChatCartProposalItemSchema = z.object({
+  medicineId: z.string().min(1),
+  name: z.string().min(1),
+  slug: z.string(),
+  manufacturer: z.string(),
+  price: z.number().finite().nonnegative(),
+  stock: z.number().int().nonnegative(),
+  imageUrl: z.string().nullable(),
+  seller: aiChatCartSellerSchema,
+  previousQuantity: z.number().int().nonnegative(),
+  quantity: z.number().int().nonnegative(),
+});
+
+const aiChatCartActionSchema = z.enum(["SET_QTY", "CLEAR"]);
+
+const aiChatCartProposalSchema = z
+  .object({
+    id: z.string().min(1),
+    action: aiChatCartActionSchema,
+    items: z.array(aiChatCartProposalItemSchema).max(AI_CHAT_MAX_CART_ITEMS),
+    cartFingerprint: z.string().min(1),
+  })
+  .superRefine((proposal, context) => {
+    if (proposal.action === "SET_QTY" && proposal.items.length === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "A quantity proposal needs at least one item.",
+      });
+    }
+  });
+
+const aiChatCartConflictCodeSchema = z.enum([
+  "CART_UNAVAILABLE",
+  "CART_LIMIT",
+  "INVALID_ACTION",
+  "INVALID_ITEM",
+  "PRODUCT_UNAVAILABLE",
+  "INSUFFICIENT_STOCK",
+  "SINGLE_SELLER",
+  "NO_CHANGE",
+]);
+
+const aiChatCartConflictSchema = z.object({
+  code: aiChatCartConflictCodeSchema,
+  message: z.string().min(1),
+});
+
+const aiChatCartSummaryItemSchema = z.object({
+  medicineId: z.string().min(1),
+  name: z.string().min(1),
+  slug: z.string(),
+  quantity: z.number().int().positive(),
+  stock: z.number().int().nonnegative(),
+  inStock: z.boolean(),
+  seller: aiChatCartSellerSchema,
+});
+
+const aiChatCartSummarySchema = z.object({
+  items: z.array(aiChatCartSummaryItemSchema),
+  totalItems: z.number().int().nonnegative(),
+  singleSeller: z.boolean(),
+});
+
+const aiChatCartSchema = z
+  .object({
+    proposal: aiChatCartProposalSchema.optional(),
+    conflict: aiChatCartConflictSchema.optional(),
+    summary: aiChatCartSummarySchema.optional(),
+  })
+  .superRefine((cart, context) => {
+    const variants = [
+      cart.proposal,
+      cart.conflict,
+      cart.summary,
+    ].filter(Boolean).length;
+
+    if (variants !== 1) {
+      context.addIssue({
+        code: "custom",
+        message: "A cart result must contain exactly one variant.",
+      });
+    }
+  });
+
 const aiChatResultSchema = z.object({
   answer: z.string(),
   products: z.array(aiChatProductSchema),
+  cart: aiChatCartSchema.optional(),
   meta: z.object({
     model: z.string(),
     toolCalls: z.number().int().nonnegative(),
@@ -61,7 +163,22 @@ export type AiChatHistoryMessage = {
 };
 
 export type AiChatProduct = z.infer<typeof aiChatProductSchema>;
+export type AiChatCartProposalItem = z.infer<
+  typeof aiChatCartProposalItemSchema
+>;
+export type AiChatCartProposal = z.infer<typeof aiChatCartProposalSchema>;
+export type AiChatCartConflictCode = z.infer<
+  typeof aiChatCartConflictCodeSchema
+>;
+export type AiChatCartConflict = z.infer<typeof aiChatCartConflictSchema>;
+export type AiChatCartSummary = z.infer<typeof aiChatCartSummarySchema>;
+export type AiChatCart = z.infer<typeof aiChatCartSchema>;
 export type AiChatResult = z.infer<typeof aiChatResultSchema>;
+
+export type AiChatCartItem = {
+  medicineId: string;
+  quantity: number;
+};
 
 export type AiChatErrorKind =
   | "http"
@@ -86,9 +203,63 @@ export class AiChatError extends Error {
   }
 }
 
+export function normalizeAiChatCart(
+  items: readonly AiChatCartItem[]
+): AiChatCartItem[] {
+  const byId = new Map<string, AiChatCartItem>();
+
+  for (const item of items) {
+    const parsed = aiChatCartInputItemSchema.safeParse(item);
+
+    if (!parsed.success) {
+      continue;
+    }
+
+    // Last write wins so a tampered duplicate cannot double-count a line.
+    byId.set(parsed.data.medicineId, parsed.data);
+  }
+
+  if (byId.size > AI_CHAT_MAX_CART_ITEMS) {
+    throw new AiChatError(
+      "invalid",
+      `Your cart is too large for the assistant. It can review up to ${AI_CHAT_MAX_CART_ITEMS} medicines at a time.`
+    );
+  }
+
+  return [...byId.values()];
+}
+
+/**
+ * Must match the backend `buildCartFingerprint` byte for byte. Code-unit
+ * ordering is used instead of localeCompare so Node and browser ICU agree.
+ */
+export function buildAiChatCartFingerprint(
+  items: readonly AiChatCartItem[]
+): string {
+  if (items.length === 0) {
+    return "empty";
+  }
+
+  return [...items]
+    .sort((left, right) => {
+      if (left.medicineId === right.medicineId) {
+        return 0;
+      }
+
+      return left.medicineId < right.medicineId ? -1 : 1;
+    })
+    .map((item) => `${item.medicineId}:${item.quantity}`)
+    .join("|");
+}
+
 export interface SendAiChatMessageInput {
   message: string;
   history?: AiChatHistoryMessage[];
+  /**
+   * Current local cart snapshot. The server re-fetches all product facts; only
+   * medicine ids and quantities are trusted.
+   */
+  cart?: AiChatCartItem[];
 }
 
 export interface SendAiChatMessageOptions {
@@ -154,6 +325,7 @@ export async function sendAiChatMessage(
   }
 
   const history = normalizeAiChatHistory(input.history ?? []);
+  const cart = input.cart ? normalizeAiChatCart(input.cart) : undefined;
   const timeoutMs = options.timeoutMs ?? AI_CHAT_TIMEOUT_MS;
   const controller = new AbortController();
   const externalSignal = options.signal;
@@ -186,7 +358,11 @@ export async function sendAiChatMessage(
         "content-type": "application/json",
       },
       credentials: "include",
-      body: JSON.stringify({ message, history }),
+      body: JSON.stringify({
+        message,
+        history,
+        ...(cart ? { cart: { items: cart } } : {}),
+      }),
       signal: controller.signal,
     });
 
@@ -263,7 +439,7 @@ export function getAiChatErrorMessage(error: unknown): string {
 
   switch (error.status) {
     case 400:
-      return "Please check your message and try again.";
+      return error.message.trim() || "Please check your message and try again.";
     case 404:
       return "The shopping assistant isn't available right now.";
     case 429:

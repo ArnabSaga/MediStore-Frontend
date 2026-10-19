@@ -1,4 +1,5 @@
 import type {
+  AiChatCart,
   AiChatHistoryMessage,
   AiChatProduct,
 } from "@/lib/ai-chat";
@@ -8,11 +9,19 @@ export interface AiChatRetryPayload {
   history: AiChatHistoryMessage[];
 }
 
+export type AiChatCartStatus =
+  | "pending"
+  | "applied"
+  | "dismissed"
+  | "stale";
+
 export interface AiChatUiMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   products?: AiChatProduct[];
+  cart?: AiChatCart;
+  cartStatus?: AiChatCartStatus;
   fallback?: boolean;
   isError?: boolean;
   retry?: AiChatRetryPayload;

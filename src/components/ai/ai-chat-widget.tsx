@@ -21,11 +21,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  AI_CHAT_MAX_CART_ITEMS,
   AiChatError,
+  buildAiChatCartFingerprint,
   getAiChatErrorMessage,
+  normalizeAiChatCart,
   sendAiChatMessage,
+  type AiChatCartItem,
+  type AiChatCartProposal,
   type AiChatHistoryMessage,
 } from "@/lib/ai-chat";
+import { useCartStore } from "@/lib/cart-store";
 
 import {
   AiChatMessage,
@@ -42,6 +48,35 @@ let messageSequence = 0;
 
 const nextMessageId = () => `ai-chat-${++messageSequence}`;
 
+const readCartSnapshot = (): AiChatCartItem[] | undefined => {
+  const items = useCartStore.getState().items;
+
+  // The backend accepts at most 20 lines. Sending a truncated snapshot would
+  // let the model reason about the wrong cart, so fall back to catalog-only
+  // mode until the cart fits.
+  if (items.length > AI_CHAT_MAX_CART_ITEMS) {
+    return undefined;
+  }
+
+  return normalizeAiChatCart(
+    items.map((item) => ({ medicineId: item.id, quantity: item.qty }))
+  );
+};
+
+const readCartFingerprint = (): string | null => {
+  const items = useCartStore.getState().items;
+
+  if (items.length > AI_CHAT_MAX_CART_ITEMS) {
+    return null;
+  }
+
+  return buildAiChatCartFingerprint(
+    normalizeAiChatCart(
+      items.map((item) => ({ medicineId: item.id, quantity: item.qty }))
+    )
+  );
+};
+
 export function AiChatWidget() {
   const pathname = usePathname();
 
@@ -54,6 +89,7 @@ export function AiChatWidget() {
   const mountedRef = useRef(true);
   const requestIdRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  const appliedProposalsRef = useRef<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -105,7 +141,7 @@ export function AiChatWidget() {
 
       try {
         const result = await sendAiChatMessage(
-          { message, history },
+          { message, history, cart: readCartSnapshot() },
           { signal: controller.signal }
         );
 
@@ -120,6 +156,8 @@ export function AiChatWidget() {
             role: "assistant",
             content: result.answer,
             products: result.products,
+            cart: result.cart,
+            cartStatus: result.cart?.proposal ? "pending" : undefined,
             fallback: result.meta.fallback,
           },
         ]);
@@ -206,6 +244,76 @@ export function AiChatWidget() {
     [requestAssistant]
   );
 
+  const handleConfirmCart = useCallback(
+    (messageId: string, proposal: AiChatCartProposal) => {
+      if (appliedProposalsRef.current.has(proposal.id)) {
+        return;
+      }
+
+      const currentFingerprint = readCartFingerprint();
+
+      if (currentFingerprint !== proposal.cartFingerprint) {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === messageId
+              ? { ...message, cartStatus: "stale" }
+              : message
+          )
+        );
+        return;
+      }
+
+      // Claim the proposal before mutating so a rapid double click cannot run
+      // the same confirmation twice.
+      appliedProposalsRef.current.add(proposal.id);
+
+      if (proposal.action === "CLEAR") {
+        useCartStore.getState().clear();
+      } else {
+        for (const item of proposal.items) {
+          useCartStore.getState().setItem(
+            {
+              id: item.medicineId,
+              name: item.name,
+              slug: item.slug,
+              manufacturer: item.manufacturer,
+              price: item.price,
+              image: item.imageUrl,
+            },
+            item.quantity
+          );
+        }
+      }
+
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id === messageId) {
+            return { ...message, cartStatus: "applied" };
+          }
+
+          // Any other pending proposal was built from the cart that just
+          // changed, so it can no longer be applied safely.
+          if (message.cart?.proposal && message.cartStatus === "pending") {
+            return { ...message, cartStatus: "stale" };
+          }
+
+          return message;
+        })
+      );
+    },
+    []
+  );
+
+  const handleCancelCart = useCallback((messageId: string) => {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === messageId && message.cartStatus === "pending"
+          ? { ...message, cartStatus: "dismissed" }
+          : message
+      )
+    );
+  }, []);
+
   if (!shouldShowAiChat(pathname)) {
     return null;
   }
@@ -283,6 +391,8 @@ export function AiChatWidget() {
                     message={message}
                     pending={pending}
                     onRetry={handleRetry}
+                    onConfirmCart={handleConfirmCart}
+                    onCancelCart={handleCancelCart}
                   />
                 ))}
                 {pending ? <AiChatTypingIndicator /> : null}
